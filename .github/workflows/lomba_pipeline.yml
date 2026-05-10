@@ -1,0 +1,86 @@
+name: Pipeline Lomba IT — Otomatis
+
+on:
+  # Jadwal: tanggal 1 dan 15 setiap bulan pukul 08.00 WIB (01.00 UTC)
+  schedule:
+    - cron: "0 1 1,15 * *"
+
+  # Bisa juga dijalankan manual dari tab "Actions" di GitHub
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (scrape saja, tidak kirim)"
+        required: false
+        default: "false"
+        type: boolean
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. Checkout kode ────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Setup Python ─────────────────────────
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── 3. Install dependencies ─────────────────
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── 4. Buat credentials.json dari Secret ────
+      - name: Setup Google credentials
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
+        # Catatan: isi GOOGLE_CREDENTIALS_JSON di GitHub Secrets
+        # Settings → Secrets and variables → Actions → New repository secret
+
+      # ── 5. Jalankan pipeline ─────────────────────
+      - name: Run pipeline
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" == "true" ]; then
+            python main.py --dry-run
+          else
+            python main.py
+          fi
+
+      # ── 6. Upload log sebagai artifact ──────────
+      - name: Upload pipeline log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-log-${{ github.run_number }}
+          path: pipeline.log
+          retention-days: 7
+
+      # ── 7. Notifikasi jika gagal ─────────────────
+      - name: Notify on failure
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python -c "
+          import os, asyncio
+          from telegram import Bot
+          async def notify():
+              bot = Bot(os.environ['TELEGRAM_BOT_TOKEN'])
+              await bot.send_message(
+                  os.environ['TELEGRAM_CHAT_ID'],
+                  '⚠️ *Pipeline Lomba IT GAGAL*\nCek log di GitHub Actions.',
+                  parse_mode='Markdown'
+              )
+          asyncio.run(notify())
+          "
