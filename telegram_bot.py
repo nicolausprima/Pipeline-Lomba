@@ -1,178 +1,164 @@
 """
-telegram_bot.py — Kirim ringkasan lomba ke grup/channel Telegram
-Library: python-telegram-bot (v20+)
-
-Setup:
-  pip install python-telegram-bot
-
-Cara dapat BOT_TOKEN:
-  - Chat @BotFather di Telegram → /newbot → ikuti instruksi
-
-Cara dapat CHAT_ID:
-  - Untuk grup: tambah bot ke grup → kirim pesan → cek via
-    https://api.telegram.org/bot<TOKEN>/getUpdates
-  - Untuk channel: tambah bot sebagai admin → gunakan @namaChannel
-    atau numeric ID (prefix dengan -100 untuk supergroup/channel)
+telegram_bot.py — Kirim notifikasi lomba ke Telegram
 """
 
 import logging
-import asyncio
+import os
+import json
+import requests
 from datetime import datetime
-from telegram import Bot
-from telegram.constants import ParseMode
-from telegram.error import TelegramError
+from typing import List, Dict
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("telegram_bot")
 
-# ──────────────────────────────────────────────
-# KONFIGURASI — EDIT BAGIAN INI
-# ──────────────────────────────────────────────
+# Load config
+CONFIG = {}
+config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+if os.path.exists(config_path):
+    with open(config_path, 'r', encoding='utf-8') as f:
+        CONFIG = json.load(f)
 
-BOT_TOKEN = "8615881534:AAE8aXfCjbV0qzOS87cKqpAjQgzJe3a56eA"   # Dari @BotFather
-CHAT_ID   = "6783869140"        # ID grup/channel tujuan
-
-MAX_LOMBA_PER_PESAN = 10   # Batasi agar pesan tidak terlalu panjang
-MAX_MESSAGE_LENGTH  = 4000 # Batas Telegram: 4096 karakter
+BOT_TOKEN = CONFIG.get('telegram_bot_token') or os.environ.get('TELEGRAM_BOT_TOKEN')
+CHAT_ID = CONFIG.get('telegram_chat_id') or os.environ.get('TELEGRAM_CHAT_ID')
 
 
-# ──────────────────────────────────────────────
-# FORMATTER PESAN
-# ──────────────────────────────────────────────
-
-def format_lomba_item(lomba: dict, index: int) -> str:
-    """Format satu item lomba jadi teks Telegram (Markdown)."""
-    nama     = lomba.get("Nama Lomba") or lomba.get("nama_lomba", "—")
-    deadline = lomba.get("Deadline")   or lomba.get("deadline",   "Cek website")
-    link     = lomba.get("Link")       or lomba.get("link",       "")
-    kategori = lomba.get("Kategori")   or lomba.get("kategori",   "—")
-
-    link_text = f"[🔗 Daftar sekarang]({link})" if link else "_(link tidak tersedia)_"
-
-    return (
-        f"*{index}. {nama}*\n"
-        f"📂 Kategori : {kategori}\n"
-        f"⏰ Deadline  : {deadline}\n"
-        f"{link_text}"
-    )
+def _escape_html(text: str) -> str:
+    if not text:
+        return "-"
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def format_pesan(lomba_list: list[dict], periode: str = "") -> list[str]:
-    """
-    Format daftar lomba jadi satu atau beberapa pesan Telegram.
-    Otomatis split jika melebihi MAX_MESSAGE_LENGTH.
-    """
-    if not periode:
-        periode = datetime.now().strftime("%d %B %Y")
-
-    header = (
-        f"🏆 *REKAP LOMBA IT — {periode}* 🏆\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-    )
-    footer = (
-        f"\n━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 *{len(lomba_list)} lomba aktif*\n"
-        f"🤖 Update otomatis tiap 2 minggu\n"
-        f"_Powered by Himpunan IT Bot_"
-    )
-
-    items = []
-    for i, lomba in enumerate(lomba_list[:MAX_LOMBA_PER_PESAN], start=1):
-        items.append(format_lomba_item(lomba, i))
-
-    # Gabungkan dan split jika terlalu panjang
-    messages = []
-    current = header
-    for item in items:
-        candidate = current + item + "\n\n"
-        if len(candidate) > MAX_MESSAGE_LENGTH:
-            messages.append(current.rstrip())
-            current = item + "\n\n"
+def format_lomba_message(lomba_list: List[Dict], periode: str) -> str:
+    if not lomba_list:
+        return f"🏆 <b>REKAP LOMBA IT — {periode}</b>\n\n<i>Tidak ada lomba aktif saat ini.</i>"
+    
+    lines = [
+        f"🏆 <b>REKAP LOMBA IT — {periode}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+    
+    for i, lomba in enumerate(lomba_list[:15], 1):
+        nama = _escape_html(lomba.get("nama_lomba", "Tidak diketahui"))
+        kategori = _escape_html(lomba.get("kategori", "Umum"))
+        deadline = _escape_html(lomba.get("deadline", "Cek website"))
+        link = lomba.get("link", "")
+        
+        if link and link != "Cek website" and link.startswith("http"):
+            link_text = f'<a href="{link}">🔗 Link Lomba</a>'
         else:
-            current = candidate
+            link_text = "<i>link tidak tersedia</i>"
+        
+        lines.append(f"{i}. <b>{nama}</b>")
+        lines.append(f"   📂 Kategori : {kategori}")
+        lines.append(f"   ⏰ Deadline  : {deadline}")
+        lines.append(f"   {link_text}")
+        lines.append("")
+    
+    total = len(lomba_list)
+    lines.extend([
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"📌 <b>{total} lomba aktif</b>",
+        "🤖 Update otomatis tiap 2 minggu",
+        "Powered by Himpunan IT Bot",
+    ])
+    
+    return "\n".join(lines)
 
-    current += footer
-    messages.append(current)
 
-    return messages
+def send_lomba_update(lomba_list: List[Dict], periode: str = None) -> bool:
+    if not BOT_TOKEN or not CHAT_ID:
+        logger.error("❌ TELEGRAM_BOT_TOKEN atau TELEGRAM_CHAT_ID tidak di-set!")
+        logger.info("💡 Tips: Buat config.json atau set environment variable")
+        return False
+    
+    if periode is None:
+        periode = datetime.now().strftime("%d %B %Y")
+    
+    message = format_lomba_message(lomba_list, periode)
+    
+    if len(message) > 4000:
+        return _send_long_message(message)
+    
+    return _send_telegram_message(message)
 
 
-# ──────────────────────────────────────────────
-# KIRIM PESAN
-# ──────────────────────────────────────────────
+def _send_telegram_message(text: str) -> bool:
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    
+    try:
+        resp = requests.post(url, json=payload, timeout=30)
+        data = resp.json()
+        
+        if data.get("ok"):
+            logger.info("✓ Pesan Telegram terkirim")
+            return True
+        else:
+            logger.error(f"✗ Telegram error: {data.get('description')}")
+            return False
+    except Exception as e:
+        logger.error(f"✗ Gagal kirim Telegram: {e}")
+        return False
 
-async def send_messages_async(messages: list[str]) -> bool:
-    """Kirim daftar pesan ke Telegram secara async."""
-    bot = Bot(token=BOT_TOKEN)
+
+def _send_long_message(text: str) -> bool:
+    lines = text.split("\n")
+    chunks = []
+    current_chunk = []
+    current_length = 0
+    
+    for line in lines:
+        line_length = len(line) + 1
+        if current_length + line_length > 4000:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = [line]
+            current_length = line_length
+        else:
+            current_chunk.append(line)
+            current_length += line_length
+    
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+    
     success = True
-
-    for i, msg in enumerate(messages):
-        try:
-            await bot.send_message(
-                chat_id=CHAT_ID,
-                text=msg,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=False,
-            )
-            logger.info(f"Pesan {i+1}/{len(messages)} berhasil dikirim")
-            if i < len(messages) - 1:
-                await asyncio.sleep(1)  # Jeda antar pesan
-        except TelegramError as e:
-            logger.error(f"Gagal kirim pesan {i+1}: {e}")
+    for i, chunk in enumerate(chunks):
+        if i > 0:
+            chunk = f"<i>(lanjutan {i+1}/{len(chunks)})</i>\n\n" + chunk
+        if not _send_telegram_message(chunk):
             success = False
-
+        import time
+        time.sleep(1)
+    
     return success
 
 
-def send_lomba_update(lomba_list: list[dict], periode: str = "") -> bool:
-    """
-    Fungsi utama: format & kirim update lomba ke Telegram.
-    Return True jika semua pesan berhasil.
-    """
-    if not lomba_list:
-        logger.warning("Tidak ada lomba untuk dikirim")
+def notify(message: str) -> bool:
+    if not BOT_TOKEN or not CHAT_ID:
+        logger.error("Telegram credentials tidak di-set!")
         return False
-
-    logger.info(f"Mengirim {len(lomba_list)} lomba ke Telegram (chat: {CHAT_ID})")
-    messages = format_pesan(lomba_list, periode)
-
-    return asyncio.run(send_messages_async(messages))
-
-
-async def send_plain_message_async(text: str) -> bool:
-    """Kirim pesan teks biasa (untuk notifikasi error/status)."""
-    bot = Bot(token=BOT_TOKEN)
+    
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML",
+    }
+    
     try:
-        await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode=ParseMode.MARKDOWN)
-        return True
-    except TelegramError as e:
+        resp = requests.post(url, json=payload, timeout=30)
+        return resp.json().get("ok", False)
+    except Exception as e:
         logger.error(f"Gagal kirim notifikasi: {e}")
         return False
 
 
-def notify(text: str) -> bool:
-    return asyncio.run(send_plain_message_async(text))
-
-
-# ──────────────────────────────────────────────
-# TEST
-# ──────────────────────────────────────────────
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-
-    sample = [
-        {"nama_lomba": "Hackathon AI Nasional 2025", "deadline": "31 Desember 2025", "link": "https://example.com/hackathon-ai", "kategori": "AI / Machine Learning"},
-        {"nama_lomba": "Data Science Competition UI", "deadline": "15 Januari 2026", "link": "https://example.com/ds-comp", "kategori": "Data Science"},
-        {"nama_lomba": "National Programming Contest", "deadline": "20 Februari 2026", "link": "https://example.com/npc", "kategori": "Programming"},
-    ]
-
-    if BOT_TOKEN == "ISI_TOKEN_BOT_KAMU_DI_SINI":
-        print("⚠️  Isi BOT_TOKEN dan CHAT_ID dulu!")
-        # Preview format pesan tanpa kirim
-        messages = format_pesan(sample)
-        print("\n── PREVIEW PESAN ──")
-        for i, msg in enumerate(messages, 1):
-            print(f"\n[Pesan {i}]\n{msg}")
-    else:
-        result = send_lomba_update(sample)
-        print("✅ Berhasil!" if result else "❌ Gagal kirim")
+def notify_error(error_message: str) -> bool:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    message = f"⚠️ <b>PIPELINE ERROR</b>\n\n<i>{timestamp}</i>\n\n<code>{error_message}</code>"
+    return notify(message)

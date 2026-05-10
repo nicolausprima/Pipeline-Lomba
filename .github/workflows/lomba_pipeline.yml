@@ -1,86 +1,87 @@
-name: Pipeline Lomba IT — Otomatis
+name: Pipeline Lomba IT
 
 on:
-  # Jadwal: tanggal 1 dan 15 setiap bulan pukul 08.00 WIB (01.00 UTC)
   schedule:
-    - cron: "0 1 1,15 * *"
-
-  # Bisa juga dijalankan manual dari tab "Actions" di GitHub
+    - cron: '0 8 1,15 * *'
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Dry run (scrape saja, tidak kirim)"
-        required: false
-        default: "false"
-        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - '**.py'
+      - '.github/workflows/**'
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    
     steps:
-      # ── 1. Checkout kode ────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Setup Python ─────────────────────────
-      - name: Setup Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: "pip"
+          python-version: '3.11'
 
-      # ── 3. Install dependencies ─────────────────
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
+          python -m playwright install chromium
 
-      # ── 4. Buat credentials.json dari Secret ────
-      - name: Setup Google credentials
-        run: |
-          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
-        # Catatan: isi GOOGLE_CREDENTIALS_JSON di GitHub Secrets
-        # Settings → Secrets and variables → Actions → New repository secret
-
-      # ── 5. Jalankan pipeline ─────────────────────
-      - name: Run pipeline
+      - name: Setup credentials
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
         run: |
-          if [ "${{ github.event.inputs.dry_run }}" == "true" ]; then
-            python main.py --dry-run
-          else
-            python main.py
-          fi
+          echo "$GOOGLE_CREDS" > credentials.json
 
-      # ── 6. Upload log sebagai artifact ──────────
-      - name: Upload pipeline log
+      - name: Setup env
+        run: |
+          echo "TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}" >> $GITHUB_ENV
+          echo "TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}" >> $GITHUB_ENV
+          echo "GOOGLE_SHEETS_ID=${{ secrets.GOOGLE_SHEETS_ID }}" >> $GITHUB_ENV
+
+      - name: Run pipeline
+        id: pipeline
+        run: |
+          python main.py 2>&1 | tee pipeline.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Upload log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pipeline-log-${{ github.run_number }}
           path: pipeline.log
-          retention-days: 7
+          retention-days: 30
 
-      # ── 7. Notifikasi jika gagal ─────────────────
-      - name: Notify on failure
-        if: failure()
+      - name: Parse summary
+        if: always()
+        id: summary
+        run: |
+          TOTAL=$(grep -oP 'Bersih: \K\d+' pipeline.log || echo "0")
+          echo "total_lomba=$TOTAL" >> $GITHUB_OUTPUT
+
+      - name: Notify Telegram
+        if: always()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python -c "
-          import os, asyncio
-          from telegram import Bot
-          async def notify():
-              bot = Bot(os.environ['TELEGRAM_BOT_TOKEN'])
-              await bot.send_message(
-                  os.environ['TELEGRAM_CHAT_ID'],
-                  '⚠️ *Pipeline Lomba IT GAGAL*\nCek log di GitHub Actions.',
-                  parse_mode='Markdown'
-              )
-          asyncio.run(notify())
-          "
+          if [ "${{ steps.pipeline.outcome }}" == "success" ]; then
+            MESSAGE="✅ <b>Pipeline Lomba BERHASIL!</b>%0A%0A📊 <b>Total Lomba:</b> ${{ steps.summary.outputs.total_lomba }}%0A📅 <b>Periode:</b> $(date +'%d %B %Y')%0A%0A🔗 <a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>Lihat Detail</a>"
+          else
+            MESSAGE="❌ <b>Pipeline Lomba GAGAL!</b>%0A%0A⚠️ Check logs:%0A<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>GitHub Actions</a>"
+          fi
+          
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=$MESSAGE" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true"
