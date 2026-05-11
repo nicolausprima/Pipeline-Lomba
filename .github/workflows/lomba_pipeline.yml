@@ -13,7 +13,7 @@ on:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -37,7 +37,7 @@ jobs:
 
       - name: Setup credentials
         env:
-          GOOGLE_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}  # ← fix nama secret
         run: |
           echo "$GOOGLE_CREDS" > credentials.json
 
@@ -65,8 +65,8 @@ jobs:
         if: always()
         id: summary
         run: |
-          TOTAL=$(grep -oP 'Bersih: \K\d+' pipeline.log || echo "0")
-          echo "total_lomba=$TOTAL" >> $GITHUB_OUTPUT
+          TOTAL=$(grep -oP 'Bersih: \K\d+' pipeline.log | head -1 || echo "0")
+          echo "total_lomba=$TOTAL" >> $GITHUB_OUTPUT  # ← fix multi-line
 
       - name: Notify Telegram
         if: always()
@@ -79,7 +79,7 @@ jobs:
           else
             MESSAGE="❌ <b>Pipeline Lomba GAGAL!</b>%0A%0A⚠️ Check logs:%0A<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>GitHub Actions</a>"
           fi
-          
+
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
             -d "text=$MESSAGE" \
